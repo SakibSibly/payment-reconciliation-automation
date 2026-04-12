@@ -6,7 +6,7 @@ from ssl_payment import run_ssl
 def main():
     print("🚀 Starting Automation...")
     run_billing_system()
-    run_nogod()
+    # run_nogod()
     run_bkash()
     run_ssl()
 
