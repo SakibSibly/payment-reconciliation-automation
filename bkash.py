@@ -431,7 +431,7 @@ def run_bkash():
             if not status_ready:
                 raise RuntimeError(f"Download Report did not become available for wallet {wallet}.")
 
-            download_dir = Path("downloaded_files")
+            download_dir = Path("downloaded_files") / "bkash"
             download_dir.mkdir(parents=True, exist_ok=True)
 
             with page.expect_download(timeout=90000) as download_info:
