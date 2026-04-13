@@ -481,3 +481,7 @@ def run_bkash():
             raise RuntimeError(f"Some wallets failed to download: {failed_text}")
 
     print("✅ bKash Automation Completed!")
+
+
+if __name__ == "__main__":
+    run_bkash()
