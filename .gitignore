@@ -21,3 +21,6 @@ __pycache__/
 # Excel output
 *.xlsx
 #!bill_payment_history.xlsx
+
+# Downloaded files
+downloaded_files/
