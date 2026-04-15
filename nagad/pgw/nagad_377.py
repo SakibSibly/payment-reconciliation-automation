@@ -44,7 +44,7 @@ def run(playwright: Playwright) -> None:
 
     output_dir = Path("downloaded_files") / "nagad"
     output_dir.mkdir(parents=True, exist_ok=True)
-    output_file = output_dir / f"payment_history_377_{target_date_display}{Path(download.suggested_filename).suffix}"
+    output_file = output_dir / f"{config('NAGAD_NUMBER_05')}_nagad_pgw_{target_date_display}{Path(download.suggested_filename).suffix}"
     download.save_as(str(output_file))
     page1.close()
 

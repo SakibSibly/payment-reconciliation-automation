@@ -120,7 +120,7 @@ def run(playwright: Playwright) -> None:
 
     output_dir = Path("downloaded_files") / "nagad"
     output_dir.mkdir(parents=True, exist_ok=True)
-    output_file = output_dir / f"payment_history_744_{target_date_display}.xlsx"
+    output_file = output_dir / f"{config('NAGAD_NUMBER_01')}_nagad_paybill_{target_date_display}.xlsx"
 
     df = pd.json_normalize(all_rows) if all_rows else pd.DataFrame()
 
