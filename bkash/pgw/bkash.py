@@ -439,7 +439,7 @@ def run_bkash():
                 download_action.click(timeout=10000)
 
             download = download_info.value
-            target_path = download_dir / f"{wallet}-{download.suggested_filename}"
+            target_path = download_dir / f"{wallet}_bkash_pgw_{download.suggested_filename}"
             download.save_as(str(target_path))
 
             if not target_path.exists() or target_path.stat().st_size == 0:
