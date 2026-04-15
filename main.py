@@ -1,5 +1,5 @@
-from nagad import run_nagad
-from bkash import run_bkash
+from nagad.nagad import run_nagad
+from bkash.pgw.bkash import run_bkash
 from billing_system import run_billing_system
 from ssl_payment import run_ssl 
 
