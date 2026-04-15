@@ -16,14 +16,12 @@ download_dir.mkdir(parents=True, exist_ok=True)
 
 
 def run(playwright: Playwright) -> None:
-    browser = playwright.chromium.launch(headless=True)
+    browser = playwright.chromium.launch(headless=False)
     context = browser.new_context()
     page = context.new_page()
     page.goto(base_url)
     page.get_by_role("textbox", name="Username").click()
-    page.get_by_role("textbox", name="Username").click()
     page.get_by_role("textbox", name="Username").fill(username)
-    page.get_by_role("textbox", name="Password").click()
     page.get_by_role("textbox", name="Password").click()
     page.get_by_role("textbox", name="Password").fill(password)
     page.get_by_role("button", name="LOGIN").click()
@@ -71,3 +69,7 @@ def run_billing_system():
         run(playwright)
 
     print("✅ Billing System Automation Completed!")
+
+
+if __name__ == "__main__":
+    run_billing_system()
