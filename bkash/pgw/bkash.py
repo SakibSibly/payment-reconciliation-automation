@@ -7,6 +7,7 @@ import json
 import re
 from pathlib import Path
 import pandas as pd
+from openpyxl import load_workbook
 
 def run_bkash():
     print("🚀 Starting bKash Automation...")
@@ -125,6 +126,16 @@ def run_bkash():
                 log_debug(f"All rows match expected day prefix: {normalized_expected}")
         except Exception as exc:
             log_debug(f"Failed to analyze downloaded report: {exc}")
+
+    def trim_xlsx_first_rows(file_path, rows_to_delete=17):
+        if file_path.suffix.lower() != ".xlsx":
+            return
+
+        wb = load_workbook(filename=str(file_path))
+        ws = wb.active
+        ws.delete_rows(1, rows_to_delete)
+        wb.save(str(file_path))
+        wb.close()
 
     def human_wait(page, min_ms=700, max_ms=1800):
         page.wait_for_timeout(random.randint(min_ms, max_ms))
@@ -444,6 +455,8 @@ def run_bkash():
 
             if not target_path.exists() or target_path.stat().st_size == 0:
                 raise RuntimeError(f"Downloaded file missing/empty for wallet {wallet}: {target_path}")
+
+            trim_xlsx_first_rows(target_path, rows_to_delete=17)
 
             print(f"Downloaded report for {wallet}: {target_path.name} ({target_path.stat().st_size} bytes)")
             analyze_downloaded_report(target_path, expected_day_prefix)

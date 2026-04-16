@@ -152,6 +152,22 @@ def run(playwright: Playwright) -> None:
         )
         df = df[~row_has_backend_msg].copy()
 
+    required_column_renames = {
+        "channel": "Channel",
+        "amount": "Amount",
+        "customerAccountNo": "Customer Account No.",
+        "referenceNo": "Reference No.",
+        "txnId": "Transaction ID",
+        "status": "Status",
+    }
+    existing_required_renames = {
+        source: target
+        for source, target in required_column_renames.items()
+        if source in df.columns
+    }
+    if existing_required_renames:
+        df = df.rename(columns=existing_required_renames)
+
     df.to_excel(output_file, index=False)
 
     print(
