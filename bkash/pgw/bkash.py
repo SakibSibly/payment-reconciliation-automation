@@ -215,8 +215,11 @@ def run_bkash():
     # Mine is Brave in windows change accordingly
     BRAVE_PATHS = {
         "linux": "/usr/bin/brave-browser",
+        # "linux": "/usr/bin/google-chrome",
         "windows": "C:/Program Files/BraveSoftware/Brave-Browser/Application/brave.exe",
+        # "windows": "C:/Program Files/Google/Chrome/Application/chrome.exe",
         "mac": "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+        # "mac": "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
     }
 
     sb = sb_cdp.Chrome(
