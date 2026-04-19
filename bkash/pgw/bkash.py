@@ -7,7 +7,111 @@ import json
 import re
 from pathlib import Path
 import pandas as pd
-from openpyxl import load_workbook
+from openpyxl import Workbook, load_workbook
+
+
+def normalize_bkash_detailed_report_xlsx(file_path: Path, *, header_row_hint: int = 18) -> None:
+    """Rewrite bKash Detailed Transaction Report into a clean flat table.
+
+    The downloaded report commonly includes merged cells and header/metadata rows.
+    This function detects the real header row (usually row 18), materializes merged
+    values, forward-fills blanks caused by merges, and overwrites the file with a
+    normalized sheet.
+    """
+
+    if file_path.suffix.lower() != ".xlsx":
+        return
+
+    wb = load_workbook(filename=str(file_path))
+    ws = wb.active
+
+    def norm(value) -> str:
+        return str(value).strip().lower() if value is not None else ""
+
+    required = {"date", "transaction id", "transaction reference"}
+    header_row: int | None = None
+    scan_max = min(ws.max_row, 120)
+    for row_no in range(1, scan_max + 1):
+        values = [norm(ws.cell(row_no, col_no).value) for col_no in range(1, ws.max_column + 1)]
+        if required.issubset(set(values)):
+            header_row = row_no
+            break
+
+    if header_row is None:
+        header_row = min(max(int(header_row_hint), 1), ws.max_row)
+
+    # Materialize merged cells that overlap the DATA area.
+    # (We intentionally avoid writing into the header row to keep column names intact.)
+    data_start_row = min(header_row + 1, ws.max_row)
+    for merged in list(ws.merged_cells.ranges):
+        if merged.max_row < data_start_row:
+            continue
+
+        top_left_value = ws.cell(merged.min_row, merged.min_col).value
+        ws.unmerge_cells(str(merged))
+        for r in range(max(merged.min_row, data_start_row), merged.max_row + 1):
+            for c in range(merged.min_col, merged.max_col + 1):
+                cell = ws.cell(r, c)
+                if cell.value in (None, ""):
+                    cell.value = top_left_value
+
+    headers = [ws.cell(header_row, col_no).value for col_no in range(1, ws.max_column + 1)]
+    last_col = 0
+    for idx, header in enumerate(headers, start=1):
+        if header not in (None, ""):
+            last_col = idx
+    if last_col == 0:
+        last_col = ws.max_column
+
+    header_norm = [norm(h) for h in headers[:last_col]]
+    tx_id_idx = header_norm.index("transaction id") if "transaction id" in header_norm else None
+
+    data_rows: list[list] = []
+    consecutive_empty = 0
+    for row_no in range(header_row + 1, ws.max_row + 1):
+        row_values = [ws.cell(row_no, col_no).value for col_no in range(1, last_col + 1)]
+        if all(v in (None, "") for v in row_values):
+            consecutive_empty += 1
+            if consecutive_empty >= 30:
+                break
+            continue
+        consecutive_empty = 0
+        data_rows.append(row_values)
+
+    # Forward-fill blanks caused by merges (date/wallet/channel often merged down).
+    for col_idx in range(last_col):
+        last_seen = None
+        for row in data_rows:
+            if row[col_idx] in (None, "") and last_seen not in (None, ""):
+                row[col_idx] = last_seen
+            else:
+                last_seen = row[col_idx]
+
+    if tx_id_idx is not None:
+        data_rows = [row for row in data_rows if row[tx_id_idx] not in (None, "")]
+
+    out_wb = Workbook()
+    out_ws = out_wb.active
+    out_ws.title = ws.title
+    out_ws.append([h for h in headers[:last_col]])
+    for row in data_rows:
+        out_ws.append(row)
+
+    # Write to a temporary path then replace original (keeps naming convention).
+    tmp_path = file_path.with_name(f"{file_path.stem}.__tmp__.xlsx")
+    try:
+        if tmp_path.exists():
+            tmp_path.unlink()
+        out_wb.save(str(tmp_path))
+        out_wb.close()
+        wb.close()
+        tmp_path.replace(file_path)
+    finally:
+        try:
+            if tmp_path.exists():
+                tmp_path.unlink()
+        except Exception:
+            pass
 
 def run_bkash():
     print("🚀 Starting bKash Automation...")
@@ -128,14 +232,9 @@ def run_bkash():
             log_debug(f"Failed to analyze downloaded report: {exc}")
 
     def trim_xlsx_first_rows(file_path, rows_to_delete=17):
-        if file_path.suffix.lower() != ".xlsx":
-            return
-
-        wb = load_workbook(filename=str(file_path))
-        ws = wb.active
-        ws.delete_rows(1, rows_to_delete)
-        wb.save(str(file_path))
-        wb.close()
+        # Backwards-compatible wrapper: older versions deleted the top rows.
+        # We now normalize the workbook into a clean, flat table.
+        normalize_bkash_detailed_report_xlsx(Path(file_path), header_row_hint=rows_to_delete + 1)
 
     def human_wait(page, min_ms=700, max_ms=1800):
         page.wait_for_timeout(random.randint(min_ms, max_ms))
