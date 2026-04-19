@@ -11,13 +11,14 @@ from playwright.sync_api import Playwright, TimeoutError as PlaywrightTimeoutErr
 
 
 CHANNEL_FILE_RE = re.compile(
-    r"^(?P<wallet>\d{11})_(?P<kind>bkash_pgw|nagad_pgw|nagad_paybill)_(?P<date>\d{4}_\d{2}_\d{2})\.xlsx$",
+    r"^(?P<wallet>\d{11})_(?P<kind>bkash_pgw|bkash_paybill|nagad_pgw|nagad_paybill)_(?P<date>\d{4}_\d{2}_\d{2})\.xlsx$",
     re.IGNORECASE,
 )
 BILLING_FILE_RE = re.compile(
     r"^(?P<system>mq|orbit_maxim|race_maxim)_payment_list_(?P<date>\d{4}_\d{2}_\d{2})\.xlsx$",
     re.IGNORECASE,
 )
+SSL_FILE_RE = re.compile(r"^ssl_(?P<date>\d{4}_\d{2}_\d{2})\.xlsx$", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -89,6 +90,20 @@ def _require(mapping: dict, key, hint: str) -> Path:
         present = ", ".join(str(k) for k in sorted(mapping.keys()))
         raise FileNotFoundError(f"Missing required file for {hint}. Present keys: {present or '<none>'}")
     return mapping[key]
+
+
+def _optional(mapping: dict, key) -> Path | None:
+    return mapping.get(key)
+
+
+def _discover_optional_ssl_file(data_dir: Path, target_date_file: str) -> Path | None:
+    for entry in data_dir.iterdir():
+        if not entry.is_file() or entry.suffix.lower() != ".xlsx":
+            continue
+        ssl_match = SSL_FILE_RE.match(entry.name)
+        if ssl_match and ssl_match.group("date") == target_date_file:
+            return entry
+    return None
 
 
 def _portal_login(page, login_url: str, username: str, password: str) -> None:
@@ -233,6 +248,20 @@ def upload_nagad_pgw(page, uploads: Iterable[ChannelUpload]) -> None:
         _upload_file_via_button(page, upload.file_path, button_index=0)
 
 
+def upload_bkash_paybill(page, uploads: Iterable[ChannelUpload]) -> None:
+    _select_channel(page, config("BKASH_PAYBILL_CHANNEL_LABEL", default="Bkash Paybill"))
+    for upload in uploads:
+        _select_wallet(page, upload.wallet)
+        _upload_file_via_button(page, upload.file_path, button_index=0)
+
+
+def upload_ssl(page, ssl_file: Path) -> None:
+    ssl_channel_label = config("SSL_CHANNEL_LABEL", default="SSL")
+    _select_channel(page, ssl_channel_label)
+    # SSL uploads are expected to not require wallet selection.
+    _upload_file_via_button(page, ssl_file, button_index=0)
+
+
 def upload_billing_system(page, uploads: Iterable[BillingUpload]) -> None:
     for upload in uploads:
         _select_dropdown_option(
@@ -271,10 +300,19 @@ def run_upload(data_dir: str | Path | None = None, *, headless: bool | None = No
 
     channel_files, billing_files = _discover_required_files(resolved_dir, target_date_file)
 
+    optional_ssl_file = _discover_optional_ssl_file(resolved_dir, target_date_file)
+
     # Upload order: match the codegen reference sequence.
     bkash_wallets = ["01322811782", "01332825960", "01844543183", "01988886328"]
     nagad_paybill_wallets = ["01322811759", "01332825960"]
     nagad_pgw_wallets = ["01322811782", "01322811758", "01332825961"]
+    # Optional: upload any bkash_paybill files that exist for these wallets.
+    # (These wallet numbers are the ones shown in the portal under Paybill.)
+    optional_bkash_paybill_wallets = [
+        "01322811782",
+        "01332825961",
+        "01844543307",
+    ]
 
     bkash_uploads = [
         ChannelUpload(
@@ -313,6 +351,16 @@ def run_upload(data_dir: str | Path | None = None, *, headless: bool | None = No
         for wallet in nagad_pgw_wallets
     ]
 
+    bkash_paybill_uploads = [
+        ChannelUpload(
+            channel_label=config("BKASH_PAYBILL_CHANNEL_LABEL", default="Bkash Paybill"),
+            wallet=wallet,
+            file_path=path,
+        )
+        for wallet in optional_bkash_paybill_wallets
+        if (path := _optional(channel_files, ("bkash_paybill", wallet))) is not None
+    ]
+
     billing_uploads = [
         BillingUpload(
             billing_system_label="MQ",
@@ -344,8 +392,10 @@ def run_upload(data_dir: str | Path | None = None, *, headless: bool | None = No
                 headless=headless,
                 target_date=target_date,
                 bkash_uploads=bkash_uploads,
+                bkash_paybill_uploads=bkash_paybill_uploads,
                 nagad_paybill_uploads=nagad_paybill_uploads,
                 nagad_pgw_uploads=nagad_pgw_uploads,
+                optional_ssl_file=optional_ssl_file,
                 billing_uploads=billing_uploads,
             )
         except PlaywrightTimeoutError as exc:
@@ -366,8 +416,10 @@ def _run_portal_upload(
     headless: bool,
     target_date: date,
     bkash_uploads: Iterable[ChannelUpload],
+    bkash_paybill_uploads: Iterable[ChannelUpload],
     nagad_paybill_uploads: Iterable[ChannelUpload],
     nagad_pgw_uploads: Iterable[ChannelUpload],
+    optional_ssl_file: Path | None,
     billing_uploads: Iterable[BillingUpload],
 ) -> None:
     browser = playwright.chromium.launch(headless=headless)
@@ -382,8 +434,12 @@ def _run_portal_upload(
     _select_previous_date_first(page, target_date)
 
     upload_bkash(page, bkash_uploads)
+    if list(bkash_paybill_uploads):
+        upload_bkash_paybill(page, bkash_paybill_uploads)
     upload_nagad_paybill(page, nagad_paybill_uploads)
     upload_nagad_pgw(page, nagad_pgw_uploads)
+    if optional_ssl_file is not None:
+        upload_ssl(page, optional_ssl_file)
     upload_billing_system(page, billing_uploads)
     compare_transactions(page)
 
