@@ -1,13 +1,14 @@
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 from seleniumbase import sb_cdp
 from decouple import config
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 import random
 import json
 import re
 from pathlib import Path
 import pandas as pd
 from openpyxl import Workbook, load_workbook
+from openpyxl.utils import get_column_letter
 
 
 def normalize_bkash_detailed_report_xlsx(file_path: Path, *, header_row_hint: int = 18) -> None:
@@ -64,7 +65,46 @@ def normalize_bkash_detailed_report_xlsx(file_path: Path, *, header_row_hint: in
         last_col = ws.max_column
 
     header_norm = [norm(h) for h in headers[:last_col]]
-    tx_id_idx = header_norm.index("transaction id") if "transaction id" in header_norm else None
+
+    def split_date_time(value):
+        if value in (None, ""):
+            return None
+
+        if isinstance(value, datetime):
+            return value.strftime("%d-%m-%Y"), value.strftime("%I:%M %p")
+
+        text = str(value).strip()
+        if not text:
+            return None
+
+        # Common cases we observed:
+        # - "18-04-2026\n12:06 AM" (newline)
+        # - "18-04-202612:49 AM" (no separator)
+        parts = [p.strip() for p in re.split(r"[\r\n]+", text) if p and p.strip()]
+        if len(parts) >= 2:
+            date_part, time_part = parts[0], parts[1]
+            if re.match(r"^\d{1,2}[-/]\d{1,2}[-/]\d{4}$", date_part) and re.match(
+                r"^\d{1,2}:\d{2}(?::\d{2})?\s*(?:AM|PM)$", time_part, flags=re.IGNORECASE
+            ):
+                return date_part, time_part
+
+        compact = re.match(
+            r"^(?P<d>\d{1,2}[-/]\d{1,2}[-/]\d{4})\s*(?P<t>\d{1,2}:\d{2}(?::\d{2})?\s*(?:AM|PM))$",
+            text,
+            flags=re.IGNORECASE,
+        )
+        if compact:
+            return compact.group("d"), compact.group("t")
+
+        spaced = re.match(
+            r"^(?P<d>\d{1,2}[-/]\d{1,2}[-/]\d{4})\s+(?P<t>\d{1,2}:\d{2}(?::\d{2})?\s*(?:AM|PM))$",
+            text,
+            flags=re.IGNORECASE,
+        )
+        if spaced:
+            return spaced.group("d"), spaced.group("t")
+
+        return None
 
     data_rows: list[list] = []
     consecutive_empty = 0
@@ -87,8 +127,52 @@ def normalize_bkash_detailed_report_xlsx(file_path: Path, *, header_row_hint: in
             else:
                 last_seen = row[col_idx]
 
-    if tx_id_idx is not None:
-        data_rows = [row for row in data_rows if row[tx_id_idx] not in (None, "")]
+    # Ensure a single Date column formatted as: "18-04-2026 04:41 PM".
+    # Some exports have Date containing date+time (newline/compact), others have Date and Time columns.
+    date_idx = None
+    for candidate in ("date time", "datetime", "date"):
+        if candidate in header_norm:
+            date_idx = header_norm.index(candidate)
+            break
+
+    time_idx = header_norm.index("time") if "time" in header_norm else None
+
+    if date_idx is not None:
+        any_combined = False
+        for row in data_rows:
+            date_val = row[date_idx]
+            time_val = row[time_idx] if time_idx is not None else None
+
+            if isinstance(date_val, datetime):
+                combined = date_val.strftime("%d-%m-%Y %I:%M %p")
+                row[date_idx] = combined
+                any_combined = True
+                continue
+
+            if time_idx is not None and time_val not in (None, "") and date_val not in (None, ""):
+                combined = f"{str(date_val).strip()} {str(time_val).strip()}"
+                row[date_idx] = combined
+                any_combined = True
+                continue
+
+            split = split_date_time(date_val)
+            if split is not None:
+                d_part, t_part = split
+                row[date_idx] = f"{d_part} {t_part}".strip()
+                any_combined = True
+
+        # If a separate Time column exists, remove it after combining.
+        if time_idx is not None and any_combined:
+            headers = list(headers[:last_col])
+            headers.pop(time_idx)
+            for row in data_rows:
+                if len(row) > time_idx:
+                    row.pop(time_idx)
+            last_col -= 1
+        else:
+            headers = list(headers[:last_col])
+    else:
+        headers = list(headers[:last_col])
 
     out_wb = Workbook()
     out_ws = out_wb.active
@@ -96,6 +180,43 @@ def normalize_bkash_detailed_report_xlsx(file_path: Path, *, header_row_hint: in
     out_ws.append([h for h in headers[:last_col]])
     for row in data_rows:
         out_ws.append(row)
+
+    # Apply consistent Excel formatting for monetary columns.
+    # Without this, Excel may display whole numbers as integers (e.g., 100 instead of 100.00).
+    money_fmt = "#,##0.00"
+
+    def is_money_header(header_value) -> bool:
+        text = str(header_value or "").strip().lower()
+        if "(in bdt" not in text:
+            return False
+        if "transaction id" in text or "transaction reference" in text:
+            return False
+        return any(key in text for key in ("amount", "charge", "cashback", "coupon", "discount"))
+
+    money_cols = [
+        idx
+        for idx, header_value in enumerate(headers[:last_col], start=1)
+        if is_money_header(header_value)
+    ]
+
+    if money_cols and out_ws.max_row >= 2:
+        for col_idx in money_cols:
+            col_letter = get_column_letter(col_idx)
+            for row_no in range(2, out_ws.max_row + 1):
+                cell = out_ws[f"{col_letter}{row_no}"]
+                if cell.value in (None, ""):
+                    continue
+                if isinstance(cell.value, (int, float)):
+                    cell.number_format = money_fmt
+                elif isinstance(cell.value, str):
+                    # Best-effort: coerce numeric strings so formatting applies.
+                    raw = cell.value.strip().replace(",", "")
+                    if re.fullmatch(r"-?\d+(?:\.\d+)?", raw):
+                        try:
+                            cell.value = float(raw)
+                            cell.number_format = money_fmt
+                        except Exception:
+                            pass
 
     # Write to a temporary path then replace original (keeps naming convention).
     tmp_path = file_path.with_name(f"{file_path.stem}.__tmp__.xlsx")
