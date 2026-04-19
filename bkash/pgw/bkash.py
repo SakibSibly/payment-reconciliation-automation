@@ -236,10 +236,12 @@ def run_bkash():
         attach_api_diagnostics(page)
 
         date_format = config("DATE_FORMAT", default="%d/%m/%Y")
-        yesterday = date.today() - timedelta(days=1)
-        date_range_value = f"{yesterday.strftime(date_format)} - {yesterday.strftime(date_format)}"
-        yesterday_iso = yesterday.strftime("%Y-%m-%d")
-        expected_day_prefix = yesterday.strftime(date_format)
+        previous_days = config("PREVIOUS_DAYS", default=1, cast=int)
+        target_dt = date.today() - timedelta(days=previous_days)
+        date_range_value = f"{target_dt.strftime(date_format)} - {target_dt.strftime(date_format)}"
+        target_iso = target_dt.strftime("%Y-%m-%d")
+        expected_day_prefix = target_dt.strftime(date_format)
+        report_date_file = target_dt.strftime("%Y_%m_%d")
 
         current_wallet = {"value": ""}
         export_payload_rewritten = {"applied": False}
@@ -252,8 +254,8 @@ def run_bkash():
                     original_to = payload.get("dateTo")
                     original_wallet = payload.get("requesterWalletNumber")
 
-                    payload["dateFrom"] = yesterday_iso
-                    payload["dateTo"] = yesterday_iso
+                    payload["dateFrom"] = target_iso
+                    payload["dateTo"] = target_iso
                     if current_wallet["value"]:
                         payload["requesterWalletNumber"] = current_wallet["value"]
 
@@ -445,7 +447,7 @@ def run_bkash():
             if not status_ready:
                 raise RuntimeError(f"Download Report did not become available for wallet {wallet}.")
 
-            download_dir = Path("downloaded_files") / "bkash"
+            download_dir = Path(report_date_file)
             download_dir.mkdir(parents=True, exist_ok=True)
 
             with page.expect_download(timeout=90000) as download_info:
@@ -453,7 +455,7 @@ def run_bkash():
                 download_action.click(timeout=10000)
 
             download = download_info.value
-            target_path = download_dir / f"{wallet}_bkash_pgw_{download.suggested_filename}"
+            target_path = download_dir / f"{wallet}_bkash_pgw_{report_date_file}.xlsx"
             download.save_as(str(target_path))
 
             if not target_path.exists() or target_path.stat().st_size == 0:

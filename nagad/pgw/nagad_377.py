@@ -11,6 +11,7 @@ def run(playwright: Playwright) -> None:
     previous_days = config("PREVIOUS_DAYS", default=1, cast=int)
     target_dt = datetime.now() - timedelta(days=previous_days)
     target_date_display = target_dt.strftime("%d-%m-%Y")
+    target_date_file = target_dt.strftime("%Y_%m_%d")
     target_day = str(target_dt.day)
 
     browser = playwright.chromium.launch(headless=False)
@@ -42,9 +43,9 @@ def run(playwright: Playwright) -> None:
         page1 = page1_info.value
     download = download_info.value
 
-    output_dir = Path("downloaded_files") / "nagad"
+    output_dir = Path(target_date_file)
     output_dir.mkdir(parents=True, exist_ok=True)
-    output_file = output_dir / f"{config('NAGAD_NUMBER_05')}_nagad_pgw_{target_date_display}{Path(download.suggested_filename).suffix}"
+    output_file = output_dir / f"{config('NAGAD_NUMBER_05')}_nagad_pgw_{target_date_file}.xlsx"
     download.save_as(str(output_file))
     page1.close()
 

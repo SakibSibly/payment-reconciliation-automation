@@ -9,9 +9,11 @@ base_url = config("OWN_URL")
 username = config("OWN_USER")
 password = config("OWN_PASS")
 previous_days = config("PREVIOUS_DAYS", default=1, cast=int)
-target_date = (datetime.now() - timedelta(days=previous_days)).strftime("%Y-%m-%d")
+target_dt = datetime.now() - timedelta(days=previous_days)
+target_date = target_dt.strftime("%Y-%m-%d")
+target_date_file = target_dt.strftime("%Y_%m_%d")
 
-download_dir = Path("downloaded_files") / "own"
+download_dir = Path(target_date_file)
 download_dir.mkdir(parents=True, exist_ok=True)
 
 
@@ -47,7 +49,7 @@ def run(playwright: Playwright) -> None:
     with page.expect_download(timeout=60000) as download_info:
         page.goto(f"{base_url}/mqsurereports/Paymentlist-reconcile")
     download = download_info.value
-    download.save_as(str(download_dir / f"mq_payment_list_{target_date}{Path(download.suggested_filename).suffix}"))
+    download.save_as(str(download_dir / f"mq_payment_list_{target_date_file}.xlsx"))
     open_mqsure_reports()
     page.get_by_role("link", name="Orbit Maxim Payment List").click()
     page.get_by_role("textbox", name="From Date").fill(target_date)
@@ -55,7 +57,7 @@ def run(playwright: Playwright) -> None:
     with page.expect_download(timeout=60000) as download1_info:
         page.get_by_role("button", name="Download").click()
     download1 = download1_info.value
-    download1.save_as(str(download_dir / f"orbit_maxim_payment_list_{target_date}{Path(download1.suggested_filename).suffix}"))
+    download1.save_as(str(download_dir / f"orbit_maxim_payment_list_{target_date_file}.xlsx"))
     open_mqsure_reports()
     page.get_by_role("link", name="Race Maxim Payment List").click()
     page.get_by_role("textbox", name="From Date").fill(target_date)
@@ -63,7 +65,7 @@ def run(playwright: Playwright) -> None:
     with page.expect_download(timeout=60000) as download2_info:
         page.get_by_role("button", name="Download").click()
     download2 = download2_info.value
-    download2.save_as(str(download_dir / f"race_maxim_payment_list_{target_date}{Path(download2.suggested_filename).suffix}"))
+    download2.save_as(str(download_dir / f"race_maxim_payment_list_{target_date_file}.xlsx"))
 
     # ---------------------
     context.close()

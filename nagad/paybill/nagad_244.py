@@ -22,6 +22,7 @@ def run(playwright: Playwright) -> None:
     target_dt = datetime.now() - timedelta(days=previous_days)
     target_date_api = target_dt.strftime("%Y%m%d")
     target_date_display = target_dt.strftime("%d-%m-%Y")
+    target_date_file = target_dt.strftime("%Y_%m_%d")
     target_day = str(target_dt.day)
 
     def extract_records(payload):
@@ -118,9 +119,9 @@ def run(playwright: Playwright) -> None:
         payload = parse_history_payload(response, page_no)
         all_rows.extend(extract_records(payload))
 
-    output_dir = Path("downloaded_files") / "nagad"
+    output_dir = Path(target_date_file)
     output_dir.mkdir(parents=True, exist_ok=True)
-    output_file = output_dir / f"{config('NAGAD_NUMBER_02')}_nagad_paybill_{target_date_display}.xlsx"
+    output_file = output_dir / f"{config('NAGAD_NUMBER_02')}_nagad_paybill_{target_date_file}.xlsx"
 
     df = pd.json_normalize(all_rows) if all_rows else pd.DataFrame()
 
