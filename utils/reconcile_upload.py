@@ -405,7 +405,55 @@ def upload_bkash_paybill(page, uploads: Iterable[ChannelUpload]) -> None:
 def upload_ssl(page, ssl_file: Path) -> None:
     ssl_channel_label = config("SSL_CHANNEL_LABEL", default="SSL")
     _select_channel(page, ssl_channel_label)
-    # SSL uploads are expected to not require wallet selection.
+
+    # Some portal configs require a wallet selection even for SSL.
+    ssl_wallet = config("SSL_WALLET", default="").strip()
+    if ssl_wallet:
+        _select_wallet(page, ssl_wallet)
+    else:
+        # Best-effort: if the wallet dropdown is present and has exactly one real option,
+        # auto-select it. If there are multiple, fail with a helpful message so the
+        # user can set SSL_WALLET.
+        try:
+            wallet_combo = page.get_by_role("combobox", name=re.compile(r"select\s+wallet", re.IGNORECASE)).first
+            if wallet_combo.is_visible() and not wallet_combo.is_disabled():
+                wallet_combo.click()
+
+                # Limit options to the currently opened listbox.
+                listboxes = page.get_by_role("listbox")
+                listbox = listboxes.nth(listboxes.count() - 1) if listboxes.count() else None
+                options_locator = (listbox.get_by_role("option") if listbox else page.get_by_role("option"))
+
+                option_texts = [t.strip() for t in options_locator.all_inner_texts() if t and t.strip()]
+                candidates = [
+                    t
+                    for t in option_texts
+                    if not re.fullmatch(r"select\s+wallet", t, flags=re.IGNORECASE)
+                ]
+
+                if len(candidates) == 1:
+                    page.get_by_role("option", name=candidates[0]).click()
+                elif len(candidates) > 1:
+                    try:
+                        page.keyboard.press("Escape")
+                    except Exception:
+                        pass
+                    raise RuntimeError(
+                        "SSL channel requires selecting a wallet. "
+                        "Set SSL_WALLET in your .env to one of: "
+                        + ", ".join(candidates)
+                    )
+
+                try:
+                    page.keyboard.press("Escape")
+                except Exception:
+                    pass
+        except RuntimeError:
+            raise
+        except Exception:
+            # If the wallet dropdown isn't present for SSL, continue.
+            pass
+
     _upload_file_via_button(page, ssl_file, button_index=0)
 
 
