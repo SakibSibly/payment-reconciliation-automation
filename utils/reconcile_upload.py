@@ -7,18 +7,31 @@ from pathlib import Path
 from typing import Iterable
 
 from decouple import config
+import pandas as pd
 from playwright.sync_api import Playwright, TimeoutError as PlaywrightTimeoutError, expect, sync_playwright
 
 
 CHANNEL_FILE_RE = re.compile(
-    r"^(?P<wallet>\d{11})_(?P<kind>bkash_pgw|bkash_paybill|nagad_pgw|nagad_paybill)_(?P<date>\d{4}_\d{2}_\d{2})\.xlsx$",
+    r"^(?P<wallet>\d{11})_(?P<kind>bkash_pgw|bkash_paybill|nagad_pgw|nagad_paybill)_(?P<date>\d{4}_\d{2}_\d{2})\.(?P<ext>xlsx|xls)$",
     re.IGNORECASE,
 )
 BILLING_FILE_RE = re.compile(
-    r"^(?P<system>mq|orbit_maxim|race_maxim)_payment_list_(?P<date>\d{4}_\d{2}_\d{2})\.xlsx$",
+    r"^(?P<system>mq|orbit_maxim|race_maxim)_payment_list_(?P<date>\d{4}_\d{2}_\d{2})\.(?P<ext>xlsx|xls)$",
     re.IGNORECASE,
 )
-SSL_FILE_RE = re.compile(r"^ssl_(?P<date>\d{4}_\d{2}_\d{2})\.xlsx$", re.IGNORECASE)
+SSL_FILE_RE = re.compile(r"^ssl_(?P<date>\d{4}_\d{2}_\d{2})\.(?P<ext>xlsx|xls|csv)$", re.IGNORECASE)
+
+# Observed SSL export naming in the workspace (example):
+# TRANSACTION_REPORT_18-04-2026_18-04-2026_<token>.csv
+SSL_TRANSACTION_REPORT_RE = re.compile(
+    r"^TRANSACTION_REPORT_(?P<from>\d{2}-\d{2}-\d{4})_(?P<to>\d{2}-\d{2}-\d{4})_.*\.csv$",
+    re.IGNORECASE,
+)
+
+# Observed legacy exports (no date embedded).
+# These are treated as bKash Paybill uploads per user mapping.
+ORBIT_LEGACY_XLS = re.compile(r"^ORBITTransDetail(?:s)?\.xls$", re.IGNORECASE)
+RACE_LEGACY_XLS = re.compile(r"^RaceonlineTransDetail(?:s)?\.xls$", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -55,6 +68,140 @@ def _resolve_target_date_and_dir(data_dir: str | Path | None) -> tuple[date, Pat
     return chosen_target, chosen_dir
 
 
+def _safe_replace_generated_file(tmp_path: Path, final_path: Path) -> None:
+    tmp_path.replace(final_path)
+
+
+def _convert_xls_to_xlsx(src_path: Path, dest_path: Path) -> Path:
+    # Some providers export XLSX content but name it .xls.
+    # Detect via the zip magic header and simply move/rename.
+    try:
+        with src_path.open("rb") as handle:
+            magic = handle.read(2)
+        if magic == b"PK":
+            src_path.replace(dest_path)
+            return dest_path
+    except Exception:
+        pass
+
+    sheets = pd.read_excel(src_path, sheet_name=None, engine="xlrd")
+    tmp_path = dest_path.with_name(f"{dest_path.stem}.__tmp__.xlsx")
+    if tmp_path.exists():
+        tmp_path.unlink()
+    with pd.ExcelWriter(tmp_path, engine="openpyxl") as writer:
+        for sheet_name, df in sheets.items():
+            safe_name = str(sheet_name)[:31] if sheet_name else "Sheet1"
+            df.to_excel(writer, index=False, sheet_name=safe_name)
+    _safe_replace_generated_file(tmp_path, dest_path)
+    return dest_path
+
+
+def _convert_csv_to_xlsx(src_path: Path, dest_path: Path) -> Path:
+    df = pd.read_csv(src_path)
+    tmp_path = dest_path.with_name(f"{dest_path.stem}.__tmp__.xlsx")
+    if tmp_path.exists():
+        tmp_path.unlink()
+    with pd.ExcelWriter(tmp_path, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name="Sheet1")
+    _safe_replace_generated_file(tmp_path, dest_path)
+    return dest_path
+
+
+def _move_or_convert_to_xlsx_and_delete_source(src_path: Path, dest_path: Path) -> Path:
+    """Create dest .xlsx from src (.xls/.csv/.xlsx) then delete src."""
+
+    suffix = src_path.suffix.lower()
+
+    if dest_path.exists():
+        # Destination already prepared; just remove legacy source.
+        if src_path.exists() and src_path.resolve() != dest_path.resolve():
+            src_path.unlink()
+        return dest_path
+
+    if suffix == ".xlsx":
+        if src_path.resolve() != dest_path.resolve():
+            src_path.replace(dest_path)
+        return dest_path
+
+    if suffix == ".xls":
+        out = _convert_xls_to_xlsx(src_path, dest_path)
+        if src_path.exists() and src_path.resolve() != dest_path.resolve():
+            src_path.unlink()
+        return out
+
+    if suffix == ".csv":
+        out = _convert_csv_to_xlsx(src_path, dest_path)
+        if src_path.exists() and src_path.resolve() != dest_path.resolve():
+            src_path.unlink()
+        return out
+
+    return src_path
+
+
+def _ensure_xlsx(path: Path, *, dest_path: Path | None = None) -> Path:
+    """Ensure the given file exists as .xlsx.
+
+    - For .xlsx: returns as-is.
+    - For .xls: converts to .xlsx.
+    - For .csv: converts to .xlsx.
+    """
+
+    suffix = path.suffix.lower()
+    if suffix == ".xlsx":
+        return path
+
+    if dest_path is None:
+        dest_path = path.with_suffix(".xlsx")
+
+    # If an .xlsx already exists, prefer it to avoid overwriting.
+    if dest_path.exists():
+        return dest_path
+
+    if suffix == ".xls":
+        return _convert_xls_to_xlsx(path, dest_path)
+    if suffix == ".csv":
+        return _convert_csv_to_xlsx(path, dest_path)
+
+    return path
+
+
+def _prepare_non_xlsx_inputs(data_dir: Path, target_date: date, target_date_file: str) -> None:
+    """Convert/rename known legacy inputs into the expected YYYY_MM_DD naming + .xlsx."""
+
+    # Per naming convention mapping (legacy files -> channel uploads).
+    orbit_paybill_expected = data_dir / f"01844543307_bkash_paybill_{target_date_file}.xlsx"
+    race_paybill_expected = data_dir / f"01322811782_bkash_paybill_{target_date_file}.xlsx"
+    ssl_expected = data_dir / f"ssl_{target_date_file}.xlsx"
+
+    for entry in data_dir.iterdir():
+        if not entry.is_file():
+            continue
+
+        name = entry.name
+        if ORBIT_LEGACY_XLS.match(name):
+            _move_or_convert_to_xlsx_and_delete_source(entry, orbit_paybill_expected)
+            continue
+        if RACE_LEGACY_XLS.match(name):
+            _move_or_convert_to_xlsx_and_delete_source(entry, race_paybill_expected)
+            continue
+
+        # Optional SSL: accept either ssl_YYYY_MM_DD.(csv/xls/xlsx) or TRANSACTION_REPORT_..csv.
+        ssl_match = SSL_FILE_RE.match(name)
+        if ssl_match and ssl_match.group("date") == target_date_file:
+            _move_or_convert_to_xlsx_and_delete_source(entry, ssl_expected)
+            continue
+
+        report_match = SSL_TRANSACTION_REPORT_RE.match(name)
+        if report_match:
+            try:
+                from_dt = datetime.strptime(report_match.group("from"), "%d-%m-%Y").date()
+            except Exception:
+                continue
+            if from_dt == target_date:
+                _move_or_convert_to_xlsx_and_delete_source(entry, ssl_expected)
+
+
+
 def _discover_required_files(data_dir: Path, target_date_file: str) -> tuple[dict[tuple[str, str], Path], dict[str, Path]]:
     if not data_dir.exists():
         raise FileNotFoundError(f"Data directory not found: {data_dir}")
@@ -63,7 +210,7 @@ def _discover_required_files(data_dir: Path, target_date_file: str) -> tuple[dic
     billing_files: dict[str, Path] = {}
 
     for entry in data_dir.iterdir():
-        if not entry.is_file() or entry.suffix.lower() != ".xlsx":
+        if not entry.is_file() or entry.suffix.lower() not in {".xlsx", ".xls"}:
             continue
 
         channel_match = CHANNEL_FILE_RE.match(entry.name)
@@ -72,7 +219,7 @@ def _discover_required_files(data_dir: Path, target_date_file: str) -> tuple[dic
                 continue
             wallet = channel_match.group("wallet")
             kind = channel_match.group("kind").lower()
-            channel_files[(kind, wallet)] = entry
+            channel_files[(kind, wallet)] = _ensure_xlsx(entry)
             continue
 
         billing_match = BILLING_FILE_RE.match(entry.name)
@@ -80,7 +227,7 @@ def _discover_required_files(data_dir: Path, target_date_file: str) -> tuple[dic
             if billing_match.group("date") != target_date_file:
                 continue
             system = billing_match.group("system").lower()
-            billing_files[system] = entry
+            billing_files[system] = _ensure_xlsx(entry)
 
     return channel_files, billing_files
 
@@ -98,11 +245,11 @@ def _optional(mapping: dict, key) -> Path | None:
 
 def _discover_optional_ssl_file(data_dir: Path, target_date_file: str) -> Path | None:
     for entry in data_dir.iterdir():
-        if not entry.is_file() or entry.suffix.lower() != ".xlsx":
+        if not entry.is_file() or entry.suffix.lower() not in {".xlsx", ".xls", ".csv"}:
             continue
         ssl_match = SSL_FILE_RE.match(entry.name)
         if ssl_match and ssl_match.group("date") == target_date_file:
-            return entry
+            return _ensure_xlsx(entry)
     return None
 
 
@@ -298,6 +445,9 @@ def run_upload(data_dir: str | Path | None = None, *, headless: bool | None = No
     target_date, resolved_dir = _resolve_target_date_and_dir(data_dir)
     target_date_file = target_date.strftime("%Y_%m_%d")
 
+    # Convert known legacy inputs (.xls) and SSL (.csv) into the expected .xlsx naming.
+    _prepare_non_xlsx_inputs(resolved_dir, target_date, target_date_file)
+
     channel_files, billing_files = _discover_required_files(resolved_dir, target_date_file)
 
     optional_ssl_file = _discover_optional_ssl_file(resolved_dir, target_date_file)
@@ -306,13 +456,7 @@ def run_upload(data_dir: str | Path | None = None, *, headless: bool | None = No
     bkash_wallets = ["01322811782", "01332825960", "01844543183", "01988886328"]
     nagad_paybill_wallets = ["01322811759", "01332825960"]
     nagad_pgw_wallets = ["01322811782", "01322811758", "01332825961"]
-    # Optional: upload any bkash_paybill files that exist for these wallets.
-    # (These wallet numbers are the ones shown in the portal under Paybill.)
-    optional_bkash_paybill_wallets = [
-        "01322811782",
-        "01332825961",
-        "01844543307",
-    ]
+    # Optional: upload any bkash_paybill files that exist in the folder.
 
     bkash_uploads = [
         ChannelUpload(
@@ -357,8 +501,8 @@ def run_upload(data_dir: str | Path | None = None, *, headless: bool | None = No
             wallet=wallet,
             file_path=path,
         )
-        for wallet in optional_bkash_paybill_wallets
-        if (path := _optional(channel_files, ("bkash_paybill", wallet))) is not None
+        for (kind, wallet), path in sorted(channel_files.items())
+        if kind == "bkash_paybill"
     ]
 
     billing_uploads = [
