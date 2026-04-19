@@ -344,6 +344,24 @@ def _upload_file_via_button(page, file_path: Path, *, button_index: int) -> None
     resolved_path = str(file_path.resolve())
     upload_button = page.get_by_role("button", name="Upload Files").nth(button_index)
 
+    settle_ms = config("UPLOAD_SETTLE_MS", default=2000, cast=int)
+
+    try:
+        upload_button.scroll_into_view_if_needed()
+    except Exception:
+        pass
+
+    # Most reliable approach: click the intended upload control and handle the file chooser.
+    try:
+        with page.expect_file_chooser(timeout=5000) as chooser_info:
+            upload_button.click()
+        chooser_info.value.set_files(resolved_path)
+        page.wait_for_timeout(settle_ms)
+        return
+    except Exception:
+        # Fall back to directly setting the underlying <input type=file>.
+        pass
+
     def try_set_on(locator) -> bool:
         try:
             locator.set_input_files(resolved_path)
@@ -354,18 +372,18 @@ def _upload_file_via_button(page, file_path: Path, *, button_index: int) -> None
     # Some portals render this as a <label role="button"> with a hidden <input type=file>.
     # Playwright requires targeting the input element.
     if try_set_on(upload_button):
-        page.wait_for_timeout(500)
+        page.wait_for_timeout(settle_ms)
         return
 
     nested_input = upload_button.locator("input[type='file']")
     if nested_input.count() > 0 and try_set_on(nested_input.first):
-        page.wait_for_timeout(500)
+        page.wait_for_timeout(settle_ms)
         return
 
     # Last resort: pick the Nth file input on the page.
     file_inputs = page.locator("input[type='file']")
     if file_inputs.count() > button_index and try_set_on(file_inputs.nth(button_index)):
-        page.wait_for_timeout(500)
+        page.wait_for_timeout(settle_ms)
         return
 
     raise RuntimeError(
